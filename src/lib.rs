@@ -1,7 +1,7 @@
 use std::vec;
 
 use bytemuck::{Pod, Zeroable};
-use wgpu::{Backends, util::DeviceExt};
+use wgpu::{util::DeviceExt, Backends};
 use winit::{
     dpi::PhysicalSize,
     event::*,
@@ -9,9 +9,118 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
+struct Batch {
+    v_buff: Option<wgpu::Buffer>,
+    i_buff: Option<wgpu::Buffer>,
+    vertices: Vec<Vertex>,
+    items: u32,
+}
 
-pub struct App {
-    state: State,
+impl Batch {
+    fn new() -> Self {
+        Self {
+            v_buff: None,
+            i_buff: None,
+            vertices: Vec::new(),
+            items: 0,
+        }
+    }
+
+    fn add_square(&mut self, square: Square, device: &wgpu::Device) {
+        self.vertices.push(Vertex {
+            position: [square.position[0], square.position[1], 0.0],
+            colour: square.colour,
+        });
+        self.vertices.push(Vertex {
+            position: [
+                square.position[0],
+                square.position[1] - square.size,
+                0.0,
+            ],
+            colour: square.colour,
+        });
+        self.vertices.push(Vertex {
+            position: [
+                square.position[0] + square.size,
+                square.position[1],
+                0.0,
+            ],
+            colour: square.colour,
+        });
+        self.vertices.push(Vertex {
+            position: [
+                square.position[0] + square.size,
+                square.position[1] - square.size,
+                0.0,
+            ],
+            colour: square.colour,
+        });
+
+        self.items += 1;
+
+        self.calculate_buffers(device);
+    }
+
+    fn calculate_buffers(&mut self, device: &wgpu::Device) {
+        let mut indices: Vec<u16> = Vec::new();
+
+        for i in 0..self.items as u16 {
+            let offset = 1 * i;
+            indices.push(0 + offset);
+            indices.push(1 + offset);
+            indices.push(2 + offset);
+            indices.push(3 + offset);
+            indices.push(2 + offset);
+            indices.push(1 + offset);
+        }
+
+        self.v_buff = Some(device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&self.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            },
+        ));
+
+        self.i_buff = Some(device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&indices),
+                usage: wgpu::BufferUsages::INDEX,
+            },
+        ));
+    }
+}
+
+struct Renderer {
+    batches: Vec<Batch>,
+    max_items_in_batch: u32,
+}
+
+impl Renderer {
+    fn new(max_items_in_batch: u32) -> Self {
+        let mut batches = Vec::new();
+        batches.push(Batch::new());
+
+        Self {
+            batches,
+            max_items_in_batch,
+        }
+    }
+
+    fn add_square(&mut self, square: Square, device: &mut wgpu::Device) {
+        if self.batches.last().unwrap().items == self.max_items_in_batch {
+            self.batches.push(Batch::new());
+        }
+
+        self.batches.last_mut().unwrap().add_square(square, device);
+    }
+}
+
+struct Square {
+    position: [f32; 2],
+    colour: [f32; 3],
+    size: f32,
 }
 
 #[repr(C)]
@@ -42,26 +151,11 @@ impl Vertex {
     }
 }
 
-const VERTICES: &[Vertex; 4] = &[
-    Vertex {
-        position: [-0.5, 0.5, 0.0],
-        colour: [0.0, 1.0, 1.0],
-    },
-    Vertex {
-        position: [-0.5, -0.5, 0.0],
-        colour: [0.0, 0.0, 1.0],
-    },
-    Vertex {
-        position: [0.5, -0.5, 0.0],
-        colour: [0.0, 1.0, 1.0],
-    },
-    Vertex {
-        position: [0.5, 0.5, 0.0],
-        colour: [0.0, 1.0, 0.0],
-    },
-];
-
-const INDICES: &[u16; 6] = &[0, 1, 2, 0, 2, 3];
+pub struct App {
+    state: State,
+    renderer: Renderer,
+    // entities: Vec<Square>,
+}
 
 impl App {
     pub async fn run() {
@@ -73,6 +167,14 @@ impl App {
             .unwrap();
 
         let mut app = App::new(window).await;
+
+        for _ in 0..2_000{
+            app.add_square(Square {
+                position: [-0.5, 0.5],
+                colour: [1f32; 3],
+                size: 1f32,
+            });
+        }
 
         event_loop.run(move |event, _, control_flow| match event {
             Event::WindowEvent {
@@ -125,7 +227,15 @@ impl App {
     pub async fn new(window: Window) -> Self {
         let state = State::new(window).await;
 
-        Self { state }
+        let renderer = Renderer::new(1000);
+
+        // let entities = Vec::new();
+
+        Self {
+            state,
+            renderer,
+            // entities,
+        }
     }
 
     fn input(&mut self, _event: &WindowEvent) -> bool {
@@ -175,22 +285,31 @@ impl App {
                     depth_stencil_attachment: None,
                 });
 
-                render_pass.set_pipeline(&self.state.pipeline);
+            render_pass.set_pipeline(&self.state.pipeline);
 
-                render_pass.set_vertex_buffer(0, self.state.v_buff.slice(..));
-        
-                render_pass.set_index_buffer(self.state.i_buff.slice(..), wgpu::IndexFormat::Uint16);
+            for batch in &self.renderer.batches {
+                let v_buff = batch.v_buff.as_ref().unwrap();
+                let i_buff = batch.i_buff.as_ref().unwrap();
+
+                render_pass.set_vertex_buffer(0, v_buff.slice(..));
+
+                render_pass.set_index_buffer(
+                    i_buff.slice(..),
+                    wgpu::IndexFormat::Uint16,
+                );
 
                 render_pass.draw_indexed(0..6, 0, 0..1);
-        
-        
-        
+            }
         }
 
         self.state.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
         Ok(())
+    }
+
+    fn add_square(&mut self, square: Square) {
+        self.renderer.add_square(square, &mut self.state.device);
     }
 }
 
@@ -202,8 +321,6 @@ struct State {
     size: winit::dpi::PhysicalSize<u32>,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    v_buff: wgpu::Buffer,
-    i_buff: wgpu::Buffer,
 }
 
 impl State {
@@ -277,9 +394,7 @@ impl State {
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: "vs_main",
-                    buffers: &[
-                        Vertex::describe()
-                    ],
+                    buffers: &[Vertex::describe()],
                 },
                 fragment: Some(wgpu::FragmentState {
                     entry_point: "fs_main",
@@ -308,23 +423,6 @@ impl State {
                 multiview: None,
             });
 
-
-        let v_buff = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor{
-                label: Some("Vertex Buffer"),
-                contents: bytemuck::cast_slice(VERTICES),
-                usage: wgpu::BufferUsages::VERTEX
-            }
-        );
-
-        let i_buff = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor{
-                label: Some("Index Buffer"),
-                contents: bytemuck::cast_slice(INDICES),
-                usage: wgpu::BufferUsages::INDEX
-            }
-        );
-
         Self {
             window,
             config,
@@ -333,8 +431,6 @@ impl State {
             size,
             surface,
             pipeline,
-            v_buff, 
-            i_buff
         }
     }
 
