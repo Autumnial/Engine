@@ -1,3 +1,4 @@
+use core::num;
 use std::vec;
 
 use bytemuck::{Pod, Zeroable};
@@ -78,7 +79,7 @@ impl Batch {
         let mut indices: Vec<u16> = Vec::new();
 
         for i in 0..self.items as u16 {
-            let offset = 1 * i;
+            let offset = 4 * i;
             indices.push(0 + offset);
             indices.push(1 + offset);
             indices.push(2 + offset);
@@ -165,8 +166,7 @@ impl Vertex {
 }
 
 struct Camera {
-    target: cgmath::Point3<f32>,
-    eye: cgmath::Point3<f32>,
+    position: cgmath::Point2<f32>,
     up: cgmath::Vector3<f32>,
     width: f32,
     height: f32,
@@ -174,7 +174,9 @@ struct Camera {
 
 impl Camera {
     fn get_projection_matrix(&self) -> cgmath::Matrix4<f32> {
-        let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
+        let eye = (self.position.x, self.position.y, -10.0).into(); 
+        let target = (self.position.x, self.position.y, 0.0).into();
+        let view = cgmath::Matrix4::look_at_rh(eye, target, self.up);
 
         let half_width = self.width / 2f32;
         let half_height = self.height / 2f32;
@@ -239,7 +241,13 @@ impl App {
         app.add_square(Square {
             position: [0.0, 0.0],
             colour: [1.0, 0.0, 0.0],
-            size: 3.0,
+            size: 1.0,
+        });
+
+        app.add_square(Square {
+            position: [-1.0, 0.0],
+            colour: [1.0, 0.0, 1.0],
+            size: 1.0,
         });
 
         event_loop.run(move |event, _, control_flow| match event {
@@ -296,10 +304,9 @@ impl App {
         let renderer = Renderer::new(1000);
 
         let camera = Camera {
-            eye: (-2.0, 2.0, -10.0).into(),
-            target: (-2.0, 2.0, 0.0).into(),
-            height: 8f32,
-            width: 8f32,
+            position: (-4.0, 4.0).into(),
+            height: 10f32,
+            width: 10f32,
             up: cgmath::Vector3::unit_y(),
         };
 
@@ -372,6 +379,7 @@ impl App {
             for batch in &self.renderer.batches {
                 let v_buff = batch.v_buff.as_ref().unwrap();
                 let i_buff = batch.i_buff.as_ref().unwrap();
+                let num_indices = batch.items * 6;
 
                 render_pass.set_vertex_buffer(0, v_buff.slice(..));
 
@@ -380,7 +388,7 @@ impl App {
                     wgpu::IndexFormat::Uint16,
                 );
 
-                render_pass.draw_indexed(0..6, 0, 0..1);
+                render_pass.draw_indexed(0..num_indices, 0, 0..1);
             }
         }
 
