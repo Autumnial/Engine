@@ -9,6 +9,14 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
+#[rustfmt::skip]
+const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 0.5, 0.0,
+    0.0, 0.0, 0.5, 1.0,
+);
+
 struct Batch {
     v_buff: Option<wgpu::Buffer>,
     i_buff: Option<wgpu::Buffer>,
@@ -27,8 +35,13 @@ impl Batch {
     }
 
     fn add_square(&mut self, square: Square, device: &wgpu::Device) {
+        #[rustfmt::skip]
         self.vertices.push(Vertex {
-            position: [square.position[0], square.position[1], 0.0],
+            position: [
+                square.position[0],
+                square.position[1],
+                0.0
+            ],
             colour: square.colour,
         });
         self.vertices.push(Vertex {
@@ -151,9 +164,56 @@ impl Vertex {
     }
 }
 
+struct Camera {
+    target: cgmath::Point3<f32>,
+    eye: cgmath::Point3<f32>,
+    up: cgmath::Vector3<f32>,
+    width: f32,
+    height: f32,
+}
+
+impl Camera {
+    fn get_projection_matrix(&self) -> cgmath::Matrix4<f32> {
+        let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
+
+        let half_width = self.width / 2f32;
+        let half_height = self.height / 2f32;
+
+        let projection = cgmath::ortho(
+            -half_width,
+            half_width,
+            half_height,
+            -half_height,
+            -5f32,
+            100f32,
+        );
+
+        return OPENGL_TO_WGPU_MATRIX * projection * view;
+    }
+}
+
+#[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+struct CameraUniform {
+    view_proj: [[f32; 4]; 4],
+}
+
+impl CameraUniform {
+    fn new() -> Self {
+        use cgmath::SquareMatrix;
+        Self {
+            view_proj: cgmath::Matrix4::identity().into(),
+        }
+    }
+
+    fn update_projection(&mut self, cam: &Camera) {
+        self.view_proj = cam.get_projection_matrix().into();
+    }
+}
 pub struct App {
     state: State,
     renderer: Renderer,
+    camera: Camera,
     // entities: Vec<Square>,
 }
 
@@ -168,13 +228,19 @@ impl App {
 
         let mut app = App::new(window).await;
 
-        for _ in 0..2_000{
-            app.add_square(Square {
-                position: [-0.5, 0.5],
-                colour: [1f32; 3],
-                size: 1f32,
-            });
-        }
+        // for _ in 0..2_000{
+        //     app.add_square(Square {
+        //         position: [-0.5, 0.5],
+        //         colour: [1f32; 3],
+        //         size: 1f32,
+        //     });
+        // }
+
+        app.add_square(Square {
+            position: [0.0, 0.0],
+            colour: [1.0, 0.0, 0.0],
+            size: 3.0,
+        });
 
         event_loop.run(move |event, _, control_flow| match event {
             Event::WindowEvent {
@@ -225,15 +291,30 @@ impl App {
     }
 
     pub async fn new(window: Window) -> Self {
-        let state = State::new(window).await;
+        let mut state = State::new(window).await;
 
         let renderer = Renderer::new(1000);
 
+        let camera = Camera {
+            eye: (-2.0, 2.0, -10.0).into(),
+            target: (-2.0, 2.0, 0.0).into(),
+            height: 8f32,
+            width: 8f32,
+            up: cgmath::Vector3::unit_y(),
+        };
+
+        state.camera_uniform.update_projection(&camera);
+        state.queue.write_buffer(
+            &state.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[state.camera_uniform]),
+        );
         // let entities = Vec::new();
 
         Self {
             state,
             renderer,
+            camera,
             // entities,
         }
     }
@@ -286,6 +367,7 @@ impl App {
                 });
 
             render_pass.set_pipeline(&self.state.pipeline);
+            render_pass.set_bind_group(0, &self.state.camera_bind_group, &[]);
 
             for batch in &self.renderer.batches {
                 let v_buff = batch.v_buff.as_ref().unwrap();
@@ -321,6 +403,9 @@ struct State {
     size: winit::dpi::PhysicalSize<u32>,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    camera_uniform: CameraUniform,
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
 }
 
 impl State {
@@ -380,10 +465,47 @@ impl State {
         let shader =
             device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
 
+        let camera_uniform = CameraUniform::new();
+
+        let camera_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                contents: bytemuck::cast_slice(&[camera_uniform]),
+                label: Some("camera buffer"),
+                usage: wgpu::BufferUsages::UNIFORM
+                    | wgpu::BufferUsages::COPY_DST,
+            });
+
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                        ty: wgpu::BufferBindingType::Uniform,
+                    },
+                    count: None,
+                }],
+                label: Some("Camera Bind Group Layout"),
+            });
+
+        let camera_bind_group =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Camera Bind Group"),
+                layout: &camera_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                }],
+            });
+
+        // should be last in this method, so we can add  bind groups and all that jazz if we wanna
+
         let pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[],
+                bind_group_layouts: &[&camera_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -431,6 +553,9 @@ impl State {
             size,
             surface,
             pipeline,
+            camera_uniform,
+            camera_buffer,
+            camera_bind_group,
         }
     }
 
